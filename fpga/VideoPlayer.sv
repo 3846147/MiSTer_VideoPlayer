@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// MiSTer VideoPlayer hybrid core - HDMI-first RC1
+// MiSTer VideoPlayer hybrid core - HDMI-first
 module emu
 (
 `include "sys/emu_ports.vh"
@@ -23,12 +23,6 @@ assign LED_DISK = 0;
 
 `include "build_id.v"
 
-// OSD status layout (read by ARM through the DDR bridge):
-// [3:2]  aspect     0=Original/4:3 canvas, 1=4:3, 2=16:9, 3=Full
-// [5:4]  scale      0=Fit, 1=Fill, 2=1:1, 3=Custom
-// [7:6]  seek step  0=5s, 1=10s, 2=30s, 3=60s
-// [9:8]  auto next  0=Off, 1=On, 2=Loop one, 3=Loop all
-// [32+]  action triggers
 localparam CONF_STR = {
     "Video Player;;",
     "SC0,AVI MP4 MKV MOV MPG M4V,Load Video;",
@@ -49,6 +43,20 @@ localparam CONF_STR = {
     "V,v",`BUILD_DATE
 };
 
+// MiSTer framework requires the core's video clock to be PLL-derived.
+// The official Template_MiSTer PLL is copied into rtl/ by GitHub Actions.
+// Its stock output is 20 MHz; this keeps the first bring-up deterministic.
+wire clk_sys;
+wire pll_locked;
+pll pll
+(
+    .refclk(CLK_50M),
+    .rst(1'b0),
+    .outclk_0(clk_sys),
+    .locked(pll_locked)
+);
+
+wire core_reset = RESET | ~pll_locked;
 wire [1:0] buttons;
 wire [127:0] status;
 wire [31:0] joystick_0;
@@ -56,13 +64,11 @@ wire [31:0] joystick_1;
 wire [0:0] img_mounted;
 wire [63:0] img_size;
 
-// J1 button #5 (joystick bit 9) may also open the framework OSD.
-// Physical MiSTer Menu/Guide continues to work normally.
 assign BUTTONS = {1'b0, joystick_0[9]};
 
 hps_io #(.CONF_STR(CONF_STR), .VDNUM(1)) hps_io
 (
-    .clk_sys(CLK_50M),
+    .clk_sys(clk_sys),
     .HPS_BUS(HPS_BUS),
     .EXT_BUS(),
     .gamma_bus(),
@@ -74,20 +80,20 @@ hps_io #(.CONF_STR(CONF_STR), .VDNUM(1)) hps_io
     .img_size(img_size)
 );
 
-// 640x480 native timing gives the MiSTer framework a stable base timing.
+// 20 MHz PLL clock, 672x496 total => ~60.004 Hz.
 wire ce_pix;
 wire hs, vs, de;
 video_timing_640x480 timing
 (
-    .clk(CLK_50M),
-    .reset(RESET),
+    .clk(clk_sys),
+    .reset(core_reset),
     .ce_pix(ce_pix),
     .hs(hs),
     .vs(vs),
     .de(de)
 );
 
-assign CLK_VIDEO = CLK_50M;
+assign CLK_VIDEO = clk_sys;
 assign CE_PIXEL  = ce_pix;
 assign VGA_HS    = hs;
 assign VGA_VS    = vs;
@@ -97,18 +103,16 @@ assign VGA_G     = 8'h00;
 assign VGA_B     = 8'h00;
 assign VGA_SCALER = 1'b0;
 
-// Framework framebuffer: ARM renders RGB565 into one of two DDR buffers.
-// A DDR control word chooses the next buffer. Switching is latched on FB_VBL.
 localparam [31:0] FB0_BASE = 32'h3A10_0000;
-localparam [31:0] FB1_BASE = 32'h3A19_6000; // + 640*480*2 = 0x96000
+localparam [31:0] FB1_BASE = 32'h3A19_6000;
 
 wire [63:0] arm_control;
 wire [31:0] heartbeat;
 
-ddr_ctrl_bridge bridge
+ddr_ctrl_bridge #(.CLK_HZ(20_000_000)) bridge
 (
-    .clk(CLK_50M),
-    .reset(RESET),
+    .clk(clk_sys),
+    .reset(core_reset),
     .joystick_0(joystick_0),
     .joystick_1(joystick_1),
     .status(status),
@@ -130,27 +134,23 @@ ddr_ctrl_bridge bridge
 
 reg fb_sel = 0;
 reg fb_vbl_d = 0;
-always @(posedge CLK_50M) begin
+always @(posedge clk_sys) begin
     fb_vbl_d <= FB_VBL;
     if(!fb_vbl_d && FB_VBL) fb_sel <= arm_control[0];
 end
 
 assign FB_EN          = 1'b1;
-assign FB_FORMAT      = 5'b0_0_100; // RGB565
+assign FB_FORMAT      = 5'b0_0_100;
 assign FB_WIDTH       = 12'd640;
 assign FB_HEIGHT      = 12'd480;
 assign FB_BASE        = fb_sel ? FB1_BASE : FB0_BASE;
 assign FB_STRIDE      = 14'd1280;
-assign FB_FORCE_BLANK = ~arm_control[1]; // ARM sets video-valid only after first frame.
+assign FB_FORCE_BLANK = ~arm_control[1];
 
-// Aspect is handled twice: the ARM compositor performs Fit/Fill/crop, while this
-// tells the MiSTer scaler the intended display shape.
 wire [1:0] aspect = status[3:2];
 assign VIDEO_ARX = (aspect == 2) ? 13'd16 : (aspect == 3) ? 13'd0 : 13'd4;
 assign VIDEO_ARY = (aspect == 2) ? 13'd9  : (aspect == 3) ? 13'd0 : 13'd3;
 
-// Audio is produced by the ARM decoder through MiSTer's ALSA path. Keep core
-// audio silent so the framework can mix/route HPS ALSA without double audio.
 assign AUDIO_S = 1'b1;
 assign AUDIO_L = 16'sd0;
 assign AUDIO_R = 16'sd0;
