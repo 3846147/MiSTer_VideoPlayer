@@ -1,0 +1,108 @@
+name: Build MiSTer VideoPlayer
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+    paths:
+      - "arm/**"
+      - "fpga/**"
+      - "install/**"
+      - "tools/**"
+      - ".github/workflows/build.yml"
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Prepare MiSTer Template sys
+        shell: bash
+        run: |
+          set -euxo pipefail
+          git clone --depth 1 https://github.com/MiSTer-devel/Template_MiSTer.git /tmp/Template_MiSTer
+          rm -rf fpga/sys
+          cp -a /tmp/Template_MiSTer/sys fpga/sys
+          if [ -f /tmp/Template_MiSTer/Template.sdc ]; then
+            cp /tmp/Template_MiSTer/Template.sdc fpga/VideoPlayer.sdc
+          fi
+
+      - name: Build ARM FFmpeg engine
+        shell: bash
+        run: |
+          set -euxo pipefail
+          docker build -t mister-videoplayer-arm ./arm
+          CID="$(docker create mister-videoplayer-arm)"
+          mkdir -p release/games/VideoPlayer
+          docker cp "${CID}:/work/VideoPlayer" release/games/VideoPlayer/VideoPlayer
+          docker rm -f "${CID}"
+          chmod +x release/games/VideoPlayer/VideoPlayer
+          file release/games/VideoPlayer/VideoPlayer
+
+      - name: Build FPGA RBF with Quartus 17
+        shell: bash
+        run: |
+          set -euxo pipefail
+          DATE="$(date +%y%m%d)"
+          printf '\x60define BUILD_DATE "%s"\n' "$DATE" > fpga/build_id.v
+
+          docker pull ghcr.io/raetro/quartus:mister
+          docker run --rm \
+            -v "$PWD/fpga:/build" \
+            -w /build \
+            ghcr.io/raetro/quartus:mister \
+            quartus_sh --flow compile VideoPlayer.qpf
+
+          test -f fpga/output_files/VideoPlayer.rbf
+          mkdir -p release/_Other
+          cp fpga/output_files/VideoPlayer.rbf release/_Other/VideoPlayer.rbf
+          cp fpga/output_files/VideoPlayer.rbf "release/_Other/VideoPlayer_${DATE}.rbf"
+
+      - name: Assemble TF card tree
+        shell: bash
+        run: |
+          set -euxo pipefail
+          bash tools/assemble_sd.sh
+          mkdir -p COPY_TO_TF
+          cp -a release/. COPY_TO_TF/
+          cat > COPY_TO_TF/安装说明.txt <<'EOF'
+          MiSTer VideoPlayer
+
+          1. 把 COPY_TO_TF 里面的内容复制到 MiSTer TF 卡根目录。
+          2. 遇到 _Other / games / Scripts / video 重名时选择合并。
+          3. TF 卡插回 MiSTer。
+          4. 运行 Scripts -> Install_VideoPlayer 一次。
+          5. 重启 MiSTer。
+          6. 进入 _Other -> VideoPlayer。
+          7. 按 OSD/Menu -> Load Video 选择视频。
+
+          首次测试推荐：
+          AVI / XVID (MPEG-4 Part 2) / 640x480 / 30fps / MP3
+          EOF
+
+      - name: Upload COPY_TO_TF
+        uses: actions/upload-artifact@v4
+        with:
+          name: COPY_TO_TF
+          path: COPY_TO_TF/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload Quartus reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Quartus-Reports
+          path: |
+            fpga/output_files/*.rpt
+            fpga/output_files/*.summary
+          if-no-files-found: ignore
+          retention-days: 30
