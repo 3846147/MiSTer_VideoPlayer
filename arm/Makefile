@@ -1,4 +1,4 @@
-CXX ?= arm-linux-gnueabihf-g++
+CXX := arm-linux-gnueabihf-g++
 PKG_CONFIG ?= arm-linux-gnueabihf-pkg-config
 PREFIX ?= /opt/vp
 CXXFLAGS += -O3 -std=c++17 -pthread -I$(PREFIX)/include
