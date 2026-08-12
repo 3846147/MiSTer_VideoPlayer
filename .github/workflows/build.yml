@@ -24,68 +24,122 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Prepare MiSTer Template sys
+      - name: Prepare MiSTer framework
         shell: bash
         run: |
           set -euxo pipefail
-          git clone --depth 1 https://github.com/MiSTer-devel/Template_MiSTer.git /tmp/Template_MiSTer
+
+          rm -rf /tmp/Template_MiSTer
+
+          git clone --depth 1 \
+            https://github.com/MiSTer-devel/Template_MiSTer.git \
+            /tmp/Template_MiSTer
+
           rm -rf fpga/sys
           cp -a /tmp/Template_MiSTer/sys fpga/sys
+
+          # Keep framework timing file available if required.
           if [ -f /tmp/Template_MiSTer/Template.sdc ]; then
             cp /tmp/Template_MiSTer/Template.sdc fpga/VideoPlayer.sdc
           fi
+
+          # Sanity checks: fail here instead of producing confusing Quartus errors.
+          test -f fpga/sys/sys.tcl
+          test -f fpga/sys/sys.qip
+          test -f fpga/sys/pll_q17.qip
+          test -f fpga/sys/sys_top.v
+          test -f fpga/sys/emu_ports.vh
+          test -f fpga/sys/hps_io.sv
+
+          echo "MiSTer framework prepared:"
+          ls -la fpga/sys/pll_q17.qip
+          ls -la fpga/sys/sys.qip
 
       - name: Build ARM FFmpeg engine
         shell: bash
         run: |
           set -euxo pipefail
+
           docker build -t mister-videoplayer-arm ./arm
+
           CID="$(docker create mister-videoplayer-arm)"
+
           mkdir -p release/games/VideoPlayer
-          docker cp "${CID}:/work/VideoPlayer" release/games/VideoPlayer/VideoPlayer
+
+          docker cp \
+            "${CID}:/work/VideoPlayer" \
+            release/games/VideoPlayer/VideoPlayer
+
           docker rm -f "${CID}"
+
           chmod +x release/games/VideoPlayer/VideoPlayer
+
           file release/games/VideoPlayer/VideoPlayer
 
       - name: Build FPGA RBF with Quartus 17
         shell: bash
         run: |
           set -euxo pipefail
+
           DATE="$(date +%y%m%d)"
-          printf '\x60define BUILD_DATE "%s"\n' "$DATE" > fpga/build_id.v
+
+          printf '\x60define BUILD_DATE "%s"\n' "$DATE" \
+            > fpga/build_id.v
+
+          rm -rf fpga/output_files
+          rm -rf fpga/db
+          rm -rf fpga/incremental_db
 
           docker pull ghcr.io/raetro/quartus:mister
+
           docker run --rm \
             -v "$PWD/fpga:/build" \
             -w /build \
             ghcr.io/raetro/quartus:mister \
-            quartus_sh --flow compile VideoPlayer.qpf
+            quartus_sh --flow compile VideoPlayer
 
           test -f fpga/output_files/VideoPlayer.rbf
+
           mkdir -p release/_Other
-          cp fpga/output_files/VideoPlayer.rbf release/_Other/VideoPlayer.rbf
-          cp fpga/output_files/VideoPlayer.rbf "release/_Other/VideoPlayer_${DATE}.rbf"
+
+          cp \
+            fpga/output_files/VideoPlayer.rbf \
+            release/_Other/VideoPlayer.rbf
+
+          cp \
+            fpga/output_files/VideoPlayer.rbf \
+            "release/_Other/VideoPlayer_${DATE}.rbf"
 
       - name: Assemble TF card tree
         shell: bash
         run: |
           set -euxo pipefail
+
           bash tools/assemble_sd.sh
+
+          rm -rf COPY_TO_TF
           mkdir -p COPY_TO_TF
+
           cp -a release/. COPY_TO_TF/
+
           cat > COPY_TO_TF/安装说明.txt <<'EOF'
           MiSTer VideoPlayer
 
-          1. 把 COPY_TO_TF 里面的内容复制到 MiSTer TF 卡根目录。
-          2. 遇到 _Other / games / Scripts / video 重名时选择合并。
+          1. 把 COPY_TO_TF 文件夹里面的内容复制到 MiSTer TF 卡根目录。
+          2. _Other / games / Scripts / video 如果重名，选择合并。
           3. TF 卡插回 MiSTer。
           4. 运行 Scripts -> Install_VideoPlayer 一次。
           5. 重启 MiSTer。
           6. 进入 _Other -> VideoPlayer。
-          7. 按 OSD/Menu -> Load Video 选择视频。
+          7. 打开 OSD/Menu -> Load Video。
+          8. 选择视频播放。
 
           首次测试推荐：
-          AVI / XVID (MPEG-4 Part 2) / 640x480 / 30fps / MP3
+          AVI
+          XVID / MPEG-4 Part 2
+          640x480
+          30fps
+          MP3
           EOF
 
       - name: Upload COPY_TO_TF
@@ -104,5 +158,6 @@ jobs:
           path: |
             fpga/output_files/*.rpt
             fpga/output_files/*.summary
+            fpga/output_files/*.msg
           if-no-files-found: ignore
           retention-days: 30
