@@ -63,7 +63,6 @@ RUN git clone --depth 1 --branch ${FFMPEG_TAG} https://github.com/FFmpeg/FFmpeg.
        --enable-demuxer=avi,mov,matroska,mpegvideo,mpegts,mpegps \
        --enable-parser=mpeg4video,h264,mpegaudio,aac,mpegvideo \
        --enable-decoder=mpeg4,h264,mpeg2video,mpeg1video,mp3,aac,pcm_s16le \
-       --enable-zlib \
     && make -j$(nproc) \
     && make install
 
