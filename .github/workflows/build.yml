@@ -11,136 +11,161 @@ on:
       - "tools/**"
       - ".github/workflows/build.yml"
 
+# Write is used only once: the first successful run vendors the exact MiSTer
+# framework+PLL into this repository. Later builds use the committed local copy.
 permissions:
-  contents: read
+  contents: write
   packages: read
 
 jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 120
+    env:
+      QUARTUS_IMAGE: ghcr.io/raetro/quartus@sha256:55442b161163dc7723e3d4917ce046fcb682478365fe9320756c9a4ae7d7d4ce
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
 
-      - name: Prepare MiSTer framework
+      - name: Vendor MiSTer framework once
         shell: bash
         run: |
           set -euxo pipefail
 
-          rm -rf /tmp/Template_MiSTer
+          NEED_VENDOR=0
+          for f in \
+            fpga/sys/sys.tcl \
+            fpga/sys/sys.qip \
+            fpga/sys/sys_top.v \
+            fpga/sys/pll_q17.qip \
+            fpga/sys/emu_ports.vh \
+            fpga/sys/hps_io.sv \
+            fpga/rtl/pll.qip \
+            fpga/rtl/pll.v \
+            fpga/rtl/pll/pll_0002.v \
+            fpga/rtl/pll/pll_0002.qip; do
+            [ -f "$f" ] || NEED_VENDOR=1
+          done
 
-          git clone --depth 1 \
-            https://github.com/MiSTer-devel/Template_MiSTer.git \
-            /tmp/Template_MiSTer
+          if [ "$NEED_VENDOR" = 1 ]; then
+            rm -rf /tmp/Template_MiSTer
+            git clone --depth 1 https://github.com/MiSTer-devel/Template_MiSTer.git /tmp/Template_MiSTer
+            FRAMEWORK_SHA="$(git -C /tmp/Template_MiSTer rev-parse HEAD)"
 
-          rm -rf fpga/sys
-          cp -a /tmp/Template_MiSTer/sys fpga/sys
+            rm -rf fpga/sys
+            cp -a /tmp/Template_MiSTer/sys fpga/sys
 
-          # Keep framework timing file available if required.
-          if [ -f /tmp/Template_MiSTer/Template.sdc ]; then
+            rm -rf fpga/rtl/pll fpga/rtl/pll.qip fpga/rtl/pll.v
+            cp -a /tmp/Template_MiSTer/rtl/pll fpga/rtl/pll
+            cp -a /tmp/Template_MiSTer/rtl/pll.qip fpga/rtl/pll.qip
+            cp -a /tmp/Template_MiSTer/rtl/pll.v fpga/rtl/pll.v
+
             cp /tmp/Template_MiSTer/Template.sdc fpga/VideoPlayer.sdc
+
+            {
+              echo "Upstream: https://github.com/MiSTer-devel/Template_MiSTer"
+              echo "Commit: ${FRAMEWORK_SHA}"
+              echo "Vendored-UTC: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+              echo "Policy: do not replace sys/ or rtl/pll* automatically after this commit"
+            } > fpga/FRAMEWORK_VERSION.txt
+
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add -f fpga/sys fpga/rtl/pll fpga/rtl/pll.qip fpga/rtl/pll.v \
+                       fpga/VideoPlayer.sdc fpga/FRAMEWORK_VERSION.txt
+
+            if ! git diff --cached --quiet; then
+              git commit -m "Vendor MiSTer framework for reproducible build [skip ci]"
+              git push origin HEAD:main
+            fi
           fi
 
-          # Sanity checks: fail here instead of producing confusing Quartus errors.
+          # From here onward, compilation is forbidden to fetch a different sys/.
           test -f fpga/sys/sys.tcl
           test -f fpga/sys/sys.qip
-          test -f fpga/sys/pll_q17.qip
           test -f fpga/sys/sys_top.v
+          test -f fpga/sys/pll_q17.qip
           test -f fpga/sys/emu_ports.vh
           test -f fpga/sys/hps_io.sv
+          test -f fpga/rtl/pll.qip
+          test -f fpga/rtl/pll.v
+          test -f fpga/rtl/pll/pll_0002.v
+          test -f fpga/rtl/pll/pll_0002.qip
+          test -f fpga/VideoPlayer.sdc
+          test -f fpga/FRAMEWORK_VERSION.txt
+          cat fpga/FRAMEWORK_VERSION.txt
 
-          echo "MiSTer framework prepared:"
-          ls -la fpga/sys/pll_q17.qip
-          ls -la fpga/sys/sys.qip
+      - name: Static project sanity checks
+        shell: bash
+        run: |
+          set -euxo pipefail
+          grep -F 'set_global_assignment -name FITTER_EFFORT "STANDARD FIT"' fpga/VideoPlayer.qsf
+          grep -F 'set_global_assignment -name LAST_QUARTUS_VERSION "17.0.2 Lite Edition"' fpga/VideoPlayer.qsf
+          grep -F 'pll pll' fpga/VideoPlayer.sv
+          grep -F 'assign CLK_VIDEO = clk_sys;' fpga/VideoPlayer.sv
+          ! grep -F -- '--enable-zlib' arm/Dockerfile
+          ! grep -E '(^|[[:space:]])-lz([[:space:]]|$)' arm/Makefile
 
       - name: Build ARM FFmpeg engine
         shell: bash
         run: |
           set -euxo pipefail
-
           docker build -t mister-videoplayer-arm ./arm
-
           CID="$(docker create mister-videoplayer-arm)"
-
           mkdir -p release/games/VideoPlayer
-
-          docker cp \
-            "${CID}:/work/VideoPlayer" \
-            release/games/VideoPlayer/VideoPlayer
-
+          docker cp "${CID}:/work/VideoPlayer" release/games/VideoPlayer/VideoPlayer
           docker rm -f "${CID}"
-
           chmod +x release/games/VideoPlayer/VideoPlayer
-
           file release/games/VideoPlayer/VideoPlayer
 
-      - name: Build FPGA RBF with Quartus 17
+      - name: Upload ARM binary early
+        uses: actions/upload-artifact@v4
+        with:
+          name: ARM-VideoPlayer
+          path: release/games/VideoPlayer/VideoPlayer
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Build FPGA RBF with pinned Quartus 17.0.2
         shell: bash
         run: |
           set -euxo pipefail
-
           DATE="$(date +%y%m%d)"
+          printf '\x60define BUILD_DATE "%s"\n' "$DATE" > fpga/build_id.v
+          rm -rf fpga/output_files fpga/db fpga/incremental_db
 
-          printf '\x60define BUILD_DATE "%s"\n' "$DATE" \
-            > fpga/build_id.v
-
-          rm -rf fpga/output_files
-          rm -rf fpga/db
-          rm -rf fpga/incremental_db
-
-          docker pull ghcr.io/raetro/quartus:mister
-
+          docker pull "$QUARTUS_IMAGE"
           docker run --rm \
             -v "$PWD/fpga:/build" \
             -w /build \
-            ghcr.io/raetro/quartus:mister \
+            "$QUARTUS_IMAGE" \
             quartus_sh --flow compile VideoPlayer
 
           test -f fpga/output_files/VideoPlayer.rbf
-
           mkdir -p release/_Other
-
-          cp \
-            fpga/output_files/VideoPlayer.rbf \
-            release/_Other/VideoPlayer.rbf
-
-          cp \
-            fpga/output_files/VideoPlayer.rbf \
-            "release/_Other/VideoPlayer_${DATE}.rbf"
+          cp fpga/output_files/VideoPlayer.rbf release/_Other/VideoPlayer.rbf
+          cp fpga/output_files/VideoPlayer.rbf "release/_Other/VideoPlayer_${DATE}.rbf"
 
       - name: Assemble TF card tree
         shell: bash
         run: |
           set -euxo pipefail
-
           bash tools/assemble_sd.sh
-
           rm -rf COPY_TO_TF
           mkdir -p COPY_TO_TF
-
           cp -a release/. COPY_TO_TF/
-
-          cat > COPY_TO_TF/安装说明.txt <<'EOF'
+          cat > COPY_TO_TF/安装说明.txt <<'EOT'
           MiSTer VideoPlayer
-
-          1. 把 COPY_TO_TF 文件夹里面的内容复制到 MiSTer TF 卡根目录。
-          2. _Other / games / Scripts / video 如果重名，选择合并。
-          3. TF 卡插回 MiSTer。
-          4. 运行 Scripts -> Install_VideoPlayer 一次。
-          5. 重启 MiSTer。
-          6. 进入 _Other -> VideoPlayer。
-          7. 打开 OSD/Menu -> Load Video。
-          8. 选择视频播放。
-
-          首次测试推荐：
-          AVI
-          XVID / MPEG-4 Part 2
-          640x480
-          30fps
-          MP3
-          EOF
+          1. 把 COPY_TO_TF 内全部内容复制到 MiSTer TF 卡根目录。
+          2. 重名目录选择合并。
+          3. 运行 Scripts -> Install_VideoPlayer 一次。
+          4. 重启 MiSTer。
+          5. 进入 _Other -> VideoPlayer。
+          6. OSD -> Load Video 选择视频。
+          EOT
 
       - name: Upload COPY_TO_TF
         uses: actions/upload-artifact@v4
@@ -159,5 +184,6 @@ jobs:
             fpga/output_files/*.rpt
             fpga/output_files/*.summary
             fpga/output_files/*.msg
+            fpga/output_files/*.smsg
           if-no-files-found: ignore
           retention-days: 30
