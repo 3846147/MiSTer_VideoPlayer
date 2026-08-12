@@ -1,0 +1,3 @@
+set_global_assignment -name SYSTEMVERILOG_FILE VideoPlayer.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/video_timing_640x480.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/ddr_ctrl_bridge.sv

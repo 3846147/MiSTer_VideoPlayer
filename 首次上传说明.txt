@@ -1,0 +1,19 @@
+第一次上传（空仓库）：
+
+方法A：GitHub网页
+1. 打开 3846147/MiSTer_VideoPlayer
+2. 点 uploading an existing file / Add file -> Upload files
+3. 解压本ZIP。
+4. 把 MiSTer_VideoPlayer_GitHub_Upload 文件夹“里面”的全部内容拖到上传区域。
+5. 注意：网页拖拽可能不会接受隐藏的 .github/.gitignore。若 .github 没上传，请使用方法B。
+
+方法B：Mac终端（推荐，能保留 .github）
+在解压目录执行：
+git init
+git branch -M main
+git remote add origin https://github.com/3846147/MiSTer_VideoPlayer.git
+git add .
+git commit -m "Initial VideoPlayer Core"
+git push -u origin main
+
+上传后进入 GitHub -> Actions -> Build MiSTer VideoPlayer。
