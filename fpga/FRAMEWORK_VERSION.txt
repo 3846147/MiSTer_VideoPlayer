@@ -1,0 +1,4 @@
+Upstream: https://github.com/MiSTer-devel/Template_MiSTer
+Commit: b4726d2dd8cfad67db3f8ba060aa4e8c13047662
+Vendored-UTC: 2026-08-12T15:32:19Z
+Policy: do not replace sys/ or rtl/pll* automatically after this commit
